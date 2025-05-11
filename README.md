@@ -1,6 +1,6 @@
 # 🔐 CryptoVault : Securing Cloud Storage
 
-This is a final-year Computer Science Engineering project that provides a secure cloud-based file storage system. Users can register, log in, and securely upload/download encrypted text files. Files are encrypted using the **NLCA (Non-Linear Cellular Automata)** algorithm on the server side before being uploaded to **Amazon S3**, and decrypted upon download to ensure end-to-end security.
+This is a final-year Computer Science Engineering project that provides a secure cloud-based file storage system. Users can register, log in, and securely upload/download encrypted text files. Files are encrypted using the **NLCA (New Lightweight Cryptographic algorithm)** algorithm on the server side before being uploaded to **Amazon S3**, and decrypted upon download to ensure end-to-end security.
 
 ---
 
