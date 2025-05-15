@@ -1,150 +1,334 @@
-// Import necessary modules
-import React, { useState } from 'react';
-import Header from '../Header';
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Link } from 'react-router-dom';
+import FileEncryption from '../utils/FileEncryption';
+import { useContext } from 'react';
+import { UserContext } from '../UserContext';
+
+// Configure axios to send cookies with every request
+axios.defaults.withCredentials = true;
+axios.defaults.baseURL = 'http://localhost:4000'; // Adjust this to your API URL
 
 export default function IndexPage() {
-  const [uploadedFile, setUploadedFile] = useState(null);
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [encryptionKey, setEncryptionKey] = useState('');
+  const [files, setFiles] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const { user } = useContext(UserContext);
 
-  // Handle file upload
-  const handleFileUpload = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      setUploadedFile(file);
-      alert(`File uploaded: ${file.name}`);
+  // Fetch user's files when component mounts
+  useEffect(() => {
+    if (user) {
+      fetchUserFiles();
+    }
+  }, [user]);
+
+  // Clear messages after 5 seconds
+  useEffect(() => {
+    if (successMessage || errorMessage) {
+      const timer = setTimeout(() => {
+        setSuccessMessage('');
+        setErrorMessage('');
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [successMessage, errorMessage]);
+
+  // Function to fetch user's files from the server
+  const fetchUserFiles = async () => {
+    try {
+      setIsLoading(true);
+      const response = await axios.get('/api/files', { withCredentials: true });
+      setFiles(response.data.files || []);
+    } catch (error) {
+      console.error('Error fetching files:', error);
+      setErrorMessage('Failed to fetch files: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // Handle file download
-  const handleFileDownload = () => {
-    if (!uploadedFile) {
-      alert('No file to download. Please upload a file first!');
+  // Handle file selection for upload
+  const handleFileChange = (e) => {
+    if (e.target.files?.length > 0) {
+      setUploadedFiles(Array.from(e.target.files));
+    }
+  };
+
+  // Handle encryption key input
+  const handleKeyChange = (e) => {
+    setEncryptionKey(e.target.value);
+  };
+
+  // Handle file upload with encryption
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    
+    // Validation
+    if (!uploadedFiles.length) {
+      setErrorMessage("Please select a file to upload");
       return;
     }
-
-    // Create a URL for the file and trigger download
-    const fileURL = URL.createObjectURL(uploadedFile);
-    const link = document.createElement('a');
-    link.href = fileURL;
-    link.download = uploadedFile.name;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    
+    if (!encryptionKey) {
+      setErrorMessage("Please enter an encryption key");
+      return;
+    }
+    
+    try {
+      setIsLoading(true);
+      
+      for (const file of uploadedFiles) {
+        // Encrypt file...
+        const encryptedBlob = await FileEncryption.encryptFile(file, encryptionKey);
+        
+        const encryptedFile = new File(
+          [encryptedBlob], 
+          file.name + '.encrypted', 
+          { type: 'text/plain' }
+        );
+        
+        const formData = new FormData();
+        formData.append('file', encryptedFile);
+        formData.append('originalType', file.type);
+        formData.append('originalName', file.name);
+        
+        // Send using session authentication (cookies)
+        await axios.post('/api/files/upload', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+          withCredentials: true
+        });
+      }
+        
+      // Refresh the file list
+      await fetchUserFiles();
+      
+      // Clear the encryption key after successful upload
+      setEncryptionKey('');
+      // Clear the file list
+      setUploadedFiles([]);
+      document.getElementById('file-upload').value = '';
+      // Show success message
+      setSuccessMessage("Files encrypted and uploaded successfully!");
+      
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      setErrorMessage('Failed to upload file: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
+  // Handle file download with decryption
+  const handleDownload = async (fileId, fileName, originalType) => {
+    try {
+      // Prompt for encryption key
+      const key = prompt('Enter decryption key for ' + fileName);
+      if (!key) return;
+      
+      // Show loading indicator
+      setIsLoading(true);
+      
+      // Request encrypted file from server
+      const response = await axios.get(`/api/files/download/${fileId}`, {
+        responseType: 'blob',
+        withCredentials: true
+      });
+      
+      // Get the encrypted content
+      const encryptedBlob = response.data;
+      
+      try {
+        // Decrypt the file
+        const decryptedBlob = await FileEncryption.decryptFile(
+          encryptedBlob, 
+          key,
+          originalType || 'application/octet-stream'
+        );
+        
+        // Download the decrypted file
+        const url = URL.createObjectURL(decryptedBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName.replace('.encrypted', '');
+        document.body.appendChild(link);
+        link.click();
+        
+        // Clean up
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        setSuccessMessage('File decrypted successfully!');
+      } catch (error) {
+        // This likely means the decryption key was incorrect
+        setErrorMessage('Failed to decrypt file. Please check your decryption key.');
+        console.error('Decryption error:', error);
+      }
+    } catch (error) {
+      console.error('Error downloading file:', error);
+      setErrorMessage('Failed to download file: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle file deletion
+  const handleDelete = async (fileId) => {
+    if (!window.confirm('Are you sure you want to delete this file?')) return;
+    
+    try {
+      setIsLoading(true);
+      await axios.delete(`/api/files/${fileId}`, { withCredentials: true });
+      
+      // Refresh the file list
+      await fetchUserFiles();
+      setSuccessMessage('File deleted successfully');
+    } catch (error) {
+      console.error('Error deleting file:', error);
+      setErrorMessage('Failed to delete file: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!user) {
+    return (
+      <div className="flex items-center justify-center flex-col min-h-screen">
+        <h1 className="text-4xl mb-4">Welcome to CryptoVault</h1>
+        <p className="mb-4">Please log in to access your secure files.</p>
+        <Link to="/login" className="bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded">
+          Log In
+        </Link>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-md bg-white rounded-lg shadow-md p-6">
-        <h1 className="text-xl font-bold text-center text-gray-800 mb-4">
-          File Upload and Download
-        </h1>
-        <div className="mb-4">
-          <label
-            htmlFor="fileInput"
-            className="block text-sm font-medium text-gray-700 mb-2"
-          >
-            Upload File
-          </label>
-          <input
-            id="fileInput"
-            type="file"
-            onChange={handleFileUpload}
-            className="block w-full text-sm text-gray-900 bg-gray-50 border border-gray-300 rounded-lg cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
+    <div className="container mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold mb-6">Your Secure Files</h1>
+      
+      {/* Status Messages */}
+      {successMessage && (
+        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 mb-4 rounded">
+          {successMessage}
         </div>
-        <div className="flex items-center justify-between mt-6">
+      )}
+      {errorMessage && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 mb-4 rounded">
+          {errorMessage}
+        </div>
+      )}
+      
+      {/* Upload Form */}
+      <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+        <h2 className="text-xl font-semibold mb-4">Upload Encrypted File</h2>
+        <form onSubmit={handleUpload} className="space-y-4">
+          <div>
+            <label className="block text-gray-700 mb-2">Select File</label>
+            <input
+              id="file-upload"
+              type="file"
+              onChange={handleFileChange}
+              className="border rounded w-full py-2 px-3"
+              multiple
+            />
+            {uploadedFiles.length > 0 && (
+              <div className="mt-2 text-sm text-gray-600">
+                {uploadedFiles.length} file(s) selected
+              </div>
+            )}
+          </div>
+          
+          <div>
+            <label className="block text-gray-700 mb-2">Encryption Key</label>
+            <input
+              type="password"
+              value={encryptionKey}
+              onChange={handleKeyChange}
+              className="border rounded w-full py-2 px-3"
+              placeholder="Enter encryption key"
+            />
+            <p className="text-sm text-gray-500 mt-1">
+              Remember this key! You'll need it to decrypt your files.
+            </p>
+          </div>
+          
           <button
-            onClick={handleFileDownload}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            type="submit"
+            className="bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded disabled:opacity-50"
+            disabled={isLoading || !uploadedFiles.length || !encryptionKey}
           >
-            Download File
+            {isLoading ? 'Encrypting & Uploading...' : 'Upload File'}
           </button>
-          {uploadedFile && (
-            <span className="text-sm text-gray-500">{uploadedFile.name}</span>
-          )}
-        </div>
+        </form>
+      </div>
+      
+      {/* File List */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-semibold mb-4">Your Files</h2>
+        
+        {isLoading && files.length === 0 ? (
+          <p className="text-gray-500">Loading your files...</p>
+        ) : files.length === 0 ? (
+          <p className="text-gray-500">You haven't uploaded any files yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead>
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    File Name
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Size
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Upload Date
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {files.map((file) => (
+                  <tr key={file._id}>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {file.fileName}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {Math.round(file.fileSize / 1024)} KB
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {new Date(file.uploadDate).toLocaleString()}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                      <button
+                        onClick={() => handleDownload(file._id, file.fileName, file.originalType)}
+                        className="text-blue-600 hover:text-blue-900"
+                        disabled={isLoading}
+                      >
+                        Download
+                      </button>
+                      <button
+                        onClick={() => handleDelete(file._id)}
+                        className="text-red-600 hover:text-red-900"
+                        disabled={isLoading}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-
-
-// import React, { useState } from 'react';
-// import AWS from 'aws-sdk';
-// import Header from '../Header';
-
-// export default function IndexPage() {
-//   const [file, setFile] = useState(null);
-//   const [downloadUrl, setDownloadUrl] = useState('');
-
-//   // AWS S3 Configuration
-//   const s3 = new AWS.S3({
-//     accessKeyId: process.env.REACT_APP_AWS_ACCESS_KEY_ID,
-//     secretAccessKey: process.env.REACT_APP_AWS_SECRET_ACCESS_KEY,
-//     region: process.env.REACT_APP_BUCKET_REGION,
-//   });
-
-//   const bucketName = 'CryptoVaultFiles';
-
-//   // Handle file selection
-//   const handleFileChange = (e) => {
-//     setFile(e.target.files[0]);
-//   };
-
-//   // Upload file to S3
-//   const handleUpload = async () => {
-//     if (!file) {
-//       alert('Please select a file first.');
-//       return;
-//     }
-
-//     const params = {
-//       Bucket: bucketName,
-//       Key: file.name,
-//       Body: file,
-//     };
-
-//     try {
-//       const uploadResult = await s3.upload(params).promise();
-//       alert('File uploaded successfully!');
-//       console.log(uploadResult);
-//     } catch (error) {
-//       console.error('Error uploading file:', error);
-//       alert('Error uploading file.');
-//     }
-//   };
-
-//   // Generate download URL
-//   const handleDownload = async () => {
-//     const params = {
-//       Bucket: bucketName,
-//       Key: file.name, // Assuming you want to download the same file
-//     };
-
-//     try {
-//       const url = s3.getSignedUrl('getObject', params);
-//       setDownloadUrl(url);
-//     } catch (error) {
-//       console.error('Error generating download URL:', error);
-//       alert('Error generating download URL.');
-//     }
-//   };
-
-//   return (
-//     <div>
-//       <Header />
-//       <h1>This is the Index Page!!</h1>
-//       <div>
-//         <input type="file" onChange={handleFileChange} />
-//         <button onClick={handleUpload}>Upload</button>
-//         <button onClick={handleDownload}>Get Download Link</button>
-//         {downloadUrl && (
-//           <div>
-//             <a href={downloadUrl} target="_blank" rel="noopener noreferrer">
-//               Download File
-//             </a>
-//           </div>
-//         )}
-//       </div>
-//     </div>
-//   );
-// }
